@@ -1,52 +1,142 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
 import os
+import shutil
 import subprocess
 import tempfile
-import json
+import tkinter as tk
 from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+
+def find_mermaid_cli():
+    """Return the installed Mermaid CLI path, or None if it cannot be found."""
+    candidates = [
+        shutil.which("mmdc.cmd"),
+        shutil.which("mmdc"),
+    ]
+
+    # npm's normal per-user Windows installation location.
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / "npm" / "mmdc.cmd")
+
+    # Keep compatibility with the path used by the older project script.
+    candidates.append(Path(r"C:\Users\Brian\AppData\Roaming\npm\mmdc.cmd"))
+
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(candidate)
+    return None
+
+
+def configure_puppeteer():
+    """Use Chrome when it is installed, without requiring one exact location."""
+    chrome_candidates = [
+        os.environ.get("CHROME_PATH"),
+        os.environ.get("PROGRAMFILES", "") + r"\Google\Chrome\Application\chrome.exe",
+        os.environ.get("PROGRAMFILES(X86)", "") + r"\Google\Chrome\Application\chrome.exe",
+        os.environ.get("LOCALAPPDATA", "") + r"\Google\Chrome\Application\chrome.exe",
+    ]
+    for chrome_path in chrome_candidates:
+        if chrome_path and Path(chrome_path).is_file():
+            os.environ["PUPPETEER_EXECUTABLE_PATH"] = chrome_path
+            return chrome_path
+    return None
+
 
 class MermaidDiagramGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Mermaid Diagram Generator")
         self.root.geometry("900x700")
-        self.root.configure(bg='#f0f0f0')
-        
-        # Configure style
+        self.root.configure(bg="#f0f0f0")
+        configure_puppeteer()
         self.setup_styles()
-        
-        # Create main frame
-        main_frame = ttk.Frame(root, style='Main.TFrame')
+
+        main_frame = ttk.Frame(root, style="Main.TFrame")
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Title
-        title_label = ttk.Label(main_frame, text="Mermaid Diagram Generator", 
-                               style='Title.TLabel')
-        title_label.pack(pady=(0, 20))
-        
-        # Input section
-        input_frame = ttk.LabelFrame(main_frame, text="Mermaid Code", 
-                                   style='Section.TLabelframe')
+
+        ttk.Label(
+            main_frame,
+            text="Mermaid Diagram Generator",
+            style="Title.TLabel",
+        ).pack(pady=(0, 20))
+
+        input_frame = ttk.LabelFrame(
+            main_frame, text="Mermaid Code", style="Section.TLabelframe"
+        )
         input_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
-        
-        # Text area for mermaid code
+
         self.text_area = scrolledtext.ScrolledText(
-            input_frame, 
-            wrap=tk.WORD, 
-            width=80, 
+            input_frame,
+            wrap=tk.WORD,
+            width=80,
             height=20,
-            font=('Consolas', 10),
-            bg='#ffffff',
-            fg='#333333',
-            insertbackground='#007acc',
-            selectbackground='#007acc',
-            selectforeground='white'
+            font=("Consolas", 10),
+            bg="#ffffff",
+            fg="#333333",
+            insertbackground="#007acc",
+            selectbackground="#007acc",
+            selectforeground="white",
         )
         self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Add sample text
-        sample_text = """graph LR
+        self.text_area.insert("1.0", self.default_mermaid_code())
+
+        options_frame = ttk.Frame(main_frame)
+        options_frame.pack(fill=tk.X, pady=(0, 15))
+
+        format_frame = ttk.LabelFrame(options_frame, text="Output Format")
+        format_frame.pack(side=tk.LEFT, padx=(0, 10))
+        self.format_var = tk.StringVar(value="png")
+        for label, value in (("PNG", "png"), ("SVG", "svg"), ("PDF", "pdf")):
+            ttk.Radiobutton(
+                format_frame, text=label, variable=self.format_var, value=value
+            ).pack(side=tk.LEFT, padx=5, pady=5)
+
+        res_frame = ttk.LabelFrame(options_frame, text="Resolution (for PNG)")
+        res_frame.pack(side=tk.LEFT, padx=(0, 10))
+        self.resolution_var = tk.StringVar(value="2")
+        for label, value in (("1x", "1"), ("2x", "2"), ("3x", "3"), ("4x", "4")):
+            ttk.Radiobutton(
+                res_frame, text=label, variable=self.resolution_var, value=value
+            ).pack(side=tk.LEFT, padx=5, pady=5)
+
+        theme_frame = ttk.LabelFrame(options_frame, text="Theme")
+        theme_frame.pack(side=tk.LEFT)
+        self.theme_var = tk.StringVar(value="default")
+        for label, value in (("Default", "default"), ("Dark", "dark"), ("Forest", "forest")):
+            ttk.Radiobutton(
+                theme_frame, text=label, variable=self.theme_var, value=value
+            ).pack(side=tk.LEFT, padx=5, pady=5)
+
+        self.transparent_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            options_frame,
+            text="Transparent Background",
+            variable=self.transparent_var,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Button(button_frame, text="Clear", command=self.clear_text).pack(
+            side=tk.LEFT, padx=(0, 10)
+        )
+        ttk.Button(button_frame, text="Load File", command=self.load_file).pack(
+            side=tk.LEFT, padx=(0, 10)
+        )
+        ttk.Button(
+            button_frame,
+            text="Generate & Save Image",
+            command=self.generate_diagram,
+        ).pack(side=tk.RIGHT)
+
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(main_frame, textvariable=self.status_var, style="Status.TLabel").pack(
+            fill=tk.X, pady=(10, 0)
+        )
+
+    @staticmethod
+    def default_mermaid_code():
+        return """graph LR
     A[PV Output
     21,435.82 kWh
     100%] --> B[Inverter Input
@@ -74,231 +164,145 @@ class MermaidDiagramGUI:
     F[Grid Purchases
     0.00 kWh
     0.0%] --> E"""
-        
-        self.text_area.insert('1.0', sample_text)
-        
-        # Options frame
-        options_frame = ttk.Frame(main_frame)
-        options_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        # Format selection
-        format_frame = ttk.LabelFrame(options_frame, text="Output Format")
-        format_frame.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.format_var = tk.StringVar(value="png")
-        formats = [("PNG", "png"), ("SVG", "svg"), ("PDF", "pdf")]
-        
-        for text, value in formats:
-            ttk.Radiobutton(format_frame, text=text, variable=self.format_var, 
-                           value=value).pack(side=tk.LEFT, padx=5, pady=5)
-        
-        # Resolution selection
-        res_frame = ttk.LabelFrame(options_frame, text="Resolution (for PNG)")
-        res_frame.pack(side=tk.LEFT, padx=(0, 10))
-        
-        self.resolution_var = tk.StringVar(value="2")
-        resolutions = [("1x", "1"), ("2x", "2"), ("3x", "3"), ("4x", "4")]
-        
-        for text, value in resolutions:
-            ttk.Radiobutton(res_frame, text=text, variable=self.resolution_var, 
-                           value=value).pack(side=tk.LEFT, padx=5, pady=5)
-        
-        # Theme selection
-        theme_frame = ttk.LabelFrame(options_frame, text="Theme")
-        theme_frame.pack(side=tk.LEFT)
-        
-        self.theme_var = tk.StringVar(value="default")
-        themes = [("Default", "default"), ("Dark", "dark"), ("Forest", "forest")]
-        
-        for text, value in themes:
-            ttk.Radiobutton(theme_frame, text=text, variable=self.theme_var, 
-                           value=value).pack(side=tk.LEFT, padx=5, pady=5)
-        
-        # Transparent background option
-        self.transparent_var = tk.BooleanVar(value=False)
-        transparent_chk = ttk.Checkbutton(options_frame, text="Transparent Background", variable=self.transparent_var)
-        transparent_chk.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Buttons frame
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Clear button
-        clear_btn = ttk.Button(button_frame, text="Clear", 
-                              command=self.clear_text, style='Action.TButton')
-        clear_btn.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Load file button
-        load_btn = ttk.Button(button_frame, text="Load File", 
-                             command=self.load_file, style='Action.TButton')
-        load_btn.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # Generate button
-        generate_btn = ttk.Button(button_frame, text="Generate & Save Image", 
-                                 command=self.generate_diagram, 
-                                 style='Primary.TButton')
-        generate_btn.pack(side=tk.RIGHT)
-        
-        # Status bar
-        self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, 
-                              style='Status.TLabel')
-        status_bar.pack(fill=tk.X, pady=(10, 0))
-        
+
     def setup_styles(self):
         style = ttk.Style()
-        
-        # Configure styles
-        style.configure('Main.TFrame', background='#f0f0f0')
-        style.configure('Title.TLabel', font=('Arial', 16, 'bold'), 
-                       background='#f0f0f0', foreground='#2c3e50')
-        style.configure('Section.TLabelframe', background='#f0f0f0')
-        style.configure('Section.TLabelframe.Label', background='#f0f0f0', 
-                       font=('Arial', 10, 'bold'))
-        style.configure('Primary.TButton', font=('Arial', 10, 'bold'))
-        style.configure('Action.TButton', font=('Arial', 9))
-        style.configure('Status.TLabel', background='#f0f0f0', 
-                       foreground='#7f8c8d', font=('Arial', 9))
-        
+        style.configure("Main.TFrame", background="#f0f0f0")
+        style.configure(
+            "Title.TLabel", font=("Arial", 16, "bold"),
+            background="#f0f0f0", foreground="#2c3e50"
+        )
+        style.configure("Section.TLabelframe", background="#f0f0f0")
+        style.configure(
+            "Section.TLabelframe.Label", background="#f0f0f0",
+            font=("Arial", 10, "bold")
+        )
+        style.configure("Status.TLabel", background="#f0f0f0", foreground="#7f8c8d")
+
     def clear_text(self):
-        self.text_area.delete('1.0', tk.END)
+        self.text_area.delete("1.0", tk.END)
         self.status_var.set("Text cleared")
-        
+
     def load_file(self):
         file_path = filedialog.askopenfilename(
             title="Select Mermaid file",
-            filetypes=[("Text files", "*.txt"), ("Mermaid files", "*.mmd"),     
-                      ("All files", "*.*")]
+            filetypes=[("Mermaid files", "*.mmd"), ("Text files", "*.txt"), ("All files", "*.*")],
         )
-        if file_path:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as file:
-                    content = file.read()
-                    self.text_area.delete('1.0', tk.END)
-                    self.text_area.insert('1.0', content)
-                    self.status_var.set(f"Loaded: {os.path.basename(file_path)}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load file: {str(e)}")
-                
+        if not file_path:
+            return
+        try:
+            content = Path(file_path).read_text(encoding="utf-8")
+            self.text_area.delete("1.0", tk.END)
+            self.text_area.insert("1.0", content)
+            self.status_var.set(f"Loaded: {Path(file_path).name}")
+        except OSError as error:
+            messagebox.showerror("Error", f"Failed to load file:\n{error}")
+
     def generate_diagram(self):
-        mermaid_code = self.text_area.get('1.0', tk.END).strip()
-        
+        mermaid_code = self.text_area.get("1.0", tk.END).strip()
         if not mermaid_code:
             messagebox.showwarning("Warning", "Please enter Mermaid diagram code")
             return
-        
-        try:
-            self.status_var.set("Generating diagram...")
-            self.root.update()
-            
-            # Get current script directory
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            # Ask user for save location and filename
-            file_format = self.format_var.get()
-            save_path = filedialog.asksaveasfilename(
-                title="Save diagram as",
-                initialdir=script_dir,
-                defaultextension=f".{file_format}",
-                filetypes=[(f"{file_format.upper()} files", f"*.{file_format}"), 
-                          ("All files", "*.*")]
+
+        mmdc_path = find_mermaid_cli()
+        if not mmdc_path:
+            messagebox.showerror(
+                "Mermaid CLI not found",
+                "Install Mermaid CLI with:\n\n"
+                "npm install -g @mermaid-js/mermaid-cli\n\n"
+                "Then restart this program.",
             )
-            
-            if not save_path:
-                self.status_var.set("Save cancelled")
-                return
-            
-            # Create temporary mermaid file
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.mmd', 
-                                           delete=False, encoding='utf-8') as temp_file:
+            self.status_var.set("Mermaid CLI not found")
+            return
+
+        file_format = self.format_var.get()
+        save_path = filedialog.asksaveasfilename(
+            title="Save diagram as",
+            initialdir=str(Path(__file__).parent),
+            defaultextension=f".{file_format}",
+            filetypes=[(f"{file_format.upper()} files", f"*.{file_format}"), ("All files", "*.*")],
+        )
+        if not save_path:
+            self.status_var.set("Save cancelled")
+            return
+
+        self.status_var.set("Generating diagram...")
+        self.root.update_idletasks()
+        temp_mmd_path = None
+        temp_css_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".mmd", delete=False, encoding="utf-8"
+            ) as temp_file:
                 temp_file.write(mermaid_code)
                 temp_mmd_path = temp_file.name
-            
-            temp_css_path = None
-            try:
-                # Build mermaid CLI command
-                cmd = [r'C:\Users\Brian\AppData\Roaming\npm\mmdc.cmd', '-i', temp_mmd_path, '-o', save_path]
-                
-                # Add format-specific options
-                if file_format == 'png':
-                    scale = self.resolution_var.get()
-                    cmd.extend(['-s', scale])
-                
-                # Add theme if not default
-                theme = self.theme_var.get()
-                if theme != 'default':
-                    cmd.extend(['-t', theme])
-                    # Use custom CSS for dark mode
-                    if theme == 'dark':
-                        # Write embedded CSS to a temp file
-                        dark_css = '''.edgePath path {\n  stroke: #fff !important;\n  stroke-width: 3px !important;\n}\n.marker {\n  stroke: #fff !important;\n  fill: #fff !important;\n}\n'''
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.css', delete=False, encoding='utf-8') as css_file:
-                            css_file.write(dark_css)
-                            temp_css_path = css_file.name
-                        cmd.extend(['--cssFile', temp_css_path])
-            
-                # Add background color or transparency
-                if file_format in ('png', 'svg'):
-                    if self.transparent_var.get():
-                        cmd.extend(['-b', 'transparent'])
-                    elif file_format == 'png':
-                        cmd.extend(['-b', 'white'])
-                
-                # Execute mermaid CLI
-                result = subprocess.run(cmd, capture_output=True, text=True, 
-                                      timeout=30)
-                
-                if result.returncode == 0:
-                    self.status_var.set(f"Diagram saved successfully: {os.path.basename(save_path)}")
-                    messagebox.showinfo("Success", 
-                                      f"Diagram saved successfully!\n\nLocation: {save_path}")
-                else:
-                    error_msg = result.stderr or "Unknown error occurred"
-                    raise Exception(error_msg)
-                    
-            finally:
-                # Clean up temporary file
-                try:
-                    os.unlink(temp_mmd_path)
-                except:
-                    pass
-                if temp_css_path:
-                    try:
-                        os.unlink(temp_css_path)
-                    except:
-                        pass
-                    
+
+            cmd = [mmdc_path, "-i", temp_mmd_path, "-o", save_path]
+            if file_format == "png":
+                cmd.extend(["-s", self.resolution_var.get()])
+
+            theme = self.theme_var.get()
+            if theme != "default":
+                cmd.extend(["-t", theme])
+                if theme == "dark":
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".css", delete=False, encoding="utf-8"
+                    ) as css_file:
+                        css_file.write(
+                            ".edgePath path { stroke: #fff !important; stroke-width: 3px !important; }\n"
+                            ".marker { stroke: #fff !important; fill: #fff !important; }\n"
+                        )
+                        temp_css_path = css_file.name
+                    cmd.extend(["--cssFile", temp_css_path])
+
+            if file_format in ("png", "svg"):
+                cmd.extend(["-b", "transparent" if self.transparent_var.get() else "white"])
+
+            startupinfo = None
+            creationflags = 0
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = subprocess.CREATE_NO_WINDOW
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            if result.returncode != 0:
+                details = result.stderr.strip() or result.stdout.strip() or "Unknown Mermaid CLI error."
+                raise RuntimeError(details)
+
+            self.status_var.set(f"Saved: {Path(save_path).name}")
+            messagebox.showinfo("Success", f"Diagram saved successfully!\n\nLocation: {save_path}")
         except subprocess.TimeoutExpired:
-            messagebox.showerror("Error", "Generation timed out. Please try again.")
             self.status_var.set("Generation timed out")
-        except FileNotFoundError:
-            messagebox.showerror("Error", 
-                               "Mermaid CLI not found!\n\n" + 
-                               "Please install mermaid-cli:\n" +
-                               "npm install -g @mermaid-js/mermaid-cli")
-            self.status_var.set("Mermaid CLI not found")
-        except Exception as e:
-            error_msg = str(e)
-            if "ENOENT" in error_msg or "command not found" in error_msg:
-                messagebox.showerror("Error", 
-                                   "Mermaid CLI not found!\n\n" + 
-                                   "Please install mermaid-cli:\n" +
-                                   "npm install -g @mermaid-js/mermaid-cli")
-            else:
-                messagebox.showerror("Error", f"Failed to generate diagram:\n{error_msg}")
-            self.status_var.set(f"Error: {error_msg}")
+            messagebox.showerror("Error", "Generation timed out after 60 seconds.")
+        except (OSError, RuntimeError) as error:
+            self.status_var.set("Generation failed")
+            messagebox.showerror("Generation failed", str(error))
+        finally:
+            for temporary_path in (temp_mmd_path, temp_css_path):
+                if temporary_path:
+                    try:
+                        Path(temporary_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
 
 def main():
     root = tk.Tk()
-    app = MermaidDiagramGUI(root)
-    
-    # Center the window
+    MermaidDiagramGUI(root)
     root.update_idletasks()
-    x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
-    y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
+    x = (root.winfo_screenwidth() - root.winfo_width()) // 2
+    y = (root.winfo_screenheight() - root.winfo_height()) // 2
     root.geometry(f"+{x}+{y}")
-    
     root.mainloop()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
